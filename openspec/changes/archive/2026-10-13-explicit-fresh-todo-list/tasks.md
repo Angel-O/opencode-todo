@@ -17,3 +17,8 @@
 - [x] 3.1 Run repository test, lint, and build scripts; confirm all pass and no generated build artifacts or unrelated source changes enter the diff. Formatting-only hunks in touched files are required by the existing Prettier hook; the separately approved secret-scanning baseline is intentional.
 - [x] 3.2 Verify the emitted metadata is consumable by the existing auto-instruct `dataEquals` condition for creation but not updates or reads, using the approved rule shape without editing auto-instruct source or external config.
 - [x] 3.3 Perform simplification self-review and source review against proposal, design, and delta specs; resolve blockers and disposition warnings before commit and archival. Code review approved with no blockers or warnings; architectural conformance review found none. Accepted suggestions: explain required formatting in the commit body and point test spec comments at stable main-spec paths applied during archival.
+
+## 4. CI verification correction
+
+- [x] 4.1 Reproduce CI's test-inclusive `bunx tsc --noEmit` errors and correct private database access in tests using the existing separate-connection pattern; remove redundant tool-layer database inspection. No production behavior or scenario changes, so no new behavioral red test is needed.
+- [x] 4.2 Verify the exact CI type check, existing tests, lint, build, and hooks; review the test-only correction. Type check passes; 76 tests pass; lint, build, and hooks pass; code review approves with no blockers or warnings. Remote CI verification is recorded on the PR after pushing.
