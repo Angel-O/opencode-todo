@@ -16,7 +16,7 @@ Add the package to your `opencode.json`/`opencode.jsonc` `plugins` array:
 
 ```jsonc
 {
-  "plugins": ["opencode-todo"]
+  "plugins": ["opencode-todo"],
 }
 ```
 
@@ -45,20 +45,20 @@ plugin's `options` object:
         "orphanGraceDays": 30,
         "sweepIntervalHours": 24,
         "dbPath": "/custom/path/todos.db",
-        "busyTimeoutMs": 5000
-      }
-    }
-  ]
+        "busyTimeoutMs": 5000,
+      },
+    },
+  ],
 }
 ```
 
-| Option | Default | Meaning |
-|---|---|---|
-| `retentionDays` | `7` | How long a `completed` item is kept after its `completed_at` timestamp before being archived (soft-deleted) by the housekeeping sweep. |
-| `orphanGraceDays` | `30` | How long a session's todos are kept, with no further writes, before the age-based orphan sweep archives them. This is a pure elapsed-time check — the sweep never queries opencode for session liveness (see [Housekeeping](#housekeeping)). |
-| `sweepIntervalHours` | `24` | Minimum time between opportunistic sweep passes. The sweep is piggybacked on `todowrite`/`todoread` calls, not run on a background timer — see below. |
-| `dbPath` | `$XDG_DATA_HOME/opencode-todo/todos.db` (falling back to `~/.local/share/opencode-todo/todos.db`) | Absolute path to the SQLite database file. Overridable per-invocation via the `OPENCODE_TODO_DB` environment variable, which takes precedence over the default but not over an explicit `dbPath` option. |
-| `busyTimeoutMs` | `5000` | `PRAGMA busy_timeout` value, in milliseconds, applied to the SQLite connection. Relevant if multiple opencode server instances share one database file. |
+| Option               | Default                                                                                           | Meaning                                                                                                                                                                                                                                      |
+| -------------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `retentionDays`      | `7`                                                                                               | How long a `completed` item is kept after its `completed_at` timestamp before being archived (soft-deleted) by the housekeeping sweep.                                                                                                       |
+| `orphanGraceDays`    | `30`                                                                                              | How long a session's todos are kept, with no further writes, before the age-based orphan sweep archives them. This is a pure elapsed-time check — the sweep never queries opencode for session liveness (see [Housekeeping](#housekeeping)). |
+| `sweepIntervalHours` | `24`                                                                                              | Minimum time between opportunistic sweep passes. The sweep is piggybacked on `todowrite`/`todoread` calls, not run on a background timer — see below.                                                                                        |
+| `dbPath`             | `$XDG_DATA_HOME/opencode-todo/todos.db` (falling back to `~/.local/share/opencode-todo/todos.db`) | Absolute path to the SQLite database file. Overridable per-invocation via the `OPENCODE_TODO_DB` environment variable, which takes precedence over the default but not over an explicit `dbPath` option.                                     |
+| `busyTimeoutMs`      | `5000`                                                                                            | `PRAGMA busy_timeout` value, in milliseconds, applied to the SQLite connection. Relevant if multiple opencode server instances share one database file.                                                                                      |
 
 An invalid value for `retentionDays`, `orphanGraceDays`, or `sweepIntervalHours` (not a
 positive finite number) is logged as a warning and the default is used instead — it
@@ -78,6 +78,37 @@ sweep or a manual database operation removes it permanently. An item's `status` 
 optional and defaults to `pending` when omitted; an explicitly supplied value outside
 `pending`/`in_progress`/`completed`/`cancelled` is still rejected.
 
+Set the optional boolean `freshList` to `true` when starting a fresh task list while
+a non-empty list already exists. You can carry unfinished items into that fresh
+list by retaining their IDs; their history is preserved. Omit the flag (or use
+`false`) for ordinary status changes, additions, removals, reordering, and other
+updates. Non-boolean values are rejected before the list changes.
+
+```json
+{
+  "freshList": true,
+  "todos": [
+    {
+      "id": "existing-item-id",
+      "content": "Carry unfinished work",
+      "status": "in_progress"
+    },
+    { "content": "Start the next task" }
+  ]
+}
+```
+
+Successful non-empty writes report `metadata.listCreated: true` when the previous
+non-archived list was empty or `freshList` is `true`, regardless of item statuses.
+Completed and cancelled items still count as an existing list. Empty writes
+always report `false`; clearing a list then writing a non-empty list reports
+creation again, even with archived history.
+
+This is a signal for the current operation, not persistent list identity or retry
+deduplication: repeated non-empty writes with `freshList: true` each report
+creation. Replacing every item in a non-empty list without the flag remains an
+ordinary update and reports `false`.
+
 ### `todoread`
 
 Returns the session's current, non-archived todo list. Its main value over reading the
@@ -85,10 +116,22 @@ transcript is surviving context compaction, where the original `todowrite` call'
 output may no longer be present in the model's context window.
 
 Both tools' results carry a `metadata` payload (`source`, `schemaVersion`, `sessionID`,
-`revision`, `todos`, `counts`) alongside their human-readable text, so other plugins
+`revision`, `todos`, `counts`, boolean `listCreated`) alongside their human-readable text, so other plugins
 already watching `tool.execute.after` host-wide (for example a plugin deriving
 conditions from todo state, such as `opencode-auto-instruct`) can reconstruct the full
 todo state without a bespoke publish channel of their own.
+
+`todoread` always reports `listCreated: false`. To react only to creation with
+`opencode-auto-instruct`, use its existing scalar matcher:
+
+```json
+{
+  "type": "dataEquals",
+  "path": "listCreated",
+  "value": true,
+  "tool": "todowrite"
+}
+```
 
 ### Gating `todowrite`/`todoread` per agent
 
@@ -102,10 +145,10 @@ subagent) access to the todo tools:
     "my-narrow-subagent": {
       "permissions": [
         { "action": "todowrite", "resource": "*", "effect": "deny" },
-        { "action": "todoread", "resource": "*", "effect": "deny" }
-      ]
-    }
-  }
+        { "action": "todoread", "resource": "*", "effect": "deny" },
+      ],
+    },
+  },
 }
 ```
 
