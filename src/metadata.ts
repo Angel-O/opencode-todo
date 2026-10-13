@@ -8,6 +8,7 @@ export interface TodoMetadata {
   revision: number;
   todos: TodoItem[];
   counts: Record<TodoStatus, number>;
+  listCreated: boolean;
 }
 
 const ZERO_COUNTS: Record<TodoStatus, number> = {
@@ -18,7 +19,12 @@ const ZERO_COUNTS: Record<TodoStatus, number> = {
 };
 
 /** Shared metadata contract for both `todowrite` and `todoread` results (design D8). */
-export function buildMetadata(sessionID: string, revision: number, todos: TodoItem[]): TodoMetadata {
+export function buildMetadata(
+  sessionID: string,
+  revision: number,
+  todos: TodoItem[],
+  listCreated: boolean = false,
+): TodoMetadata {
   const counts = { ...ZERO_COUNTS };
   for (const todo of todos) counts[todo.status] += 1;
   return {
@@ -28,5 +34,6 @@ export function buildMetadata(sessionID: string, revision: number, todos: TodoIt
     revision,
     todos,
     counts,
+    listCreated,
   };
 }

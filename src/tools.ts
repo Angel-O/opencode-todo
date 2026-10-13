@@ -31,7 +31,9 @@ const STATUS_MARKER: Record<TodoStatus, string> = {
 };
 
 /** Compact, human-readable rendering of the current list for the model-visible text field. */
-function renderSummary(todos: readonly { status: TodoStatus; content: string }[]): string {
+function renderSummary(
+  todos: readonly { status: TodoStatus; content: string }[],
+): string {
   if (todos.length === 0) return "(no todos)";
   return todos.map((t) => `${STATUS_MARKER[t.status]} ${t.content}`).join("\n");
 }
@@ -67,7 +69,11 @@ const TODOWRITE_DESCRIPTION =
   "omitted is archived, not merely left alone. Echo back the `id` of any item you are carrying " +
   "forward unchanged so its creation time and completion time are preserved; omit `id` only for " +
   "a genuinely new item. `status` defaults to `pending` when omitted, so a newly added item " +
-  "needs no explicit status. Use this to track multi-step work so it survives context compaction.";
+  "needs no explicit status. Set `freshList: true` when starting a fresh task list while a " +
+  "non-empty list already exists, including when carrying unfinished items forward. Omit it " +
+  "for ordinary updates. Non-empty writes to an empty list automatically report creation; " +
+  "empty writes never do. Returns the current list and boolean `listCreated` metadata. " +
+  "Use this to track multi-step work so it survives context compaction.";
 
 const TODOREAD_DESCRIPTION =
   "Read back the current session's todo list exactly as last written by todowrite. Use this " +
@@ -82,19 +88,30 @@ export function createTodoWriteTool(store: Store, log: Logger = defaultLogger) {
     input: {
       type: "object",
       properties: {
+        freshList: {
+          type: "boolean",
+          description:
+            "Set true for a fresh task list replacing a non-empty list; omit for updates",
+        },
         todos: {
           type: "array",
           items: {
             type: "object",
             properties: {
-              id: { type: "string", description: "Id of an existing item to carry forward" },
+              id: {
+                type: "string",
+                description: "Id of an existing item to carry forward",
+              },
               content: { type: "string", description: "The todo's text" },
               status: {
                 type: "string",
                 enum: ["pending", "in_progress", "completed", "cancelled"],
-                description: "Defaults to \"pending\" when omitted",
+                description: 'Defaults to "pending" when omitted',
               },
-              priority: { type: "string", description: "Optional free-form priority label" },
+              priority: {
+                type: "string",
+                description: "Optional free-form priority label",
+              },
             },
             required: ["content"],
           },
@@ -104,15 +121,31 @@ export function createTodoWriteTool(store: Store, log: Logger = defaultLogger) {
     },
     options: { codemode: false as const },
     async execute(
-      input: { todos: unknown },
+      input: { todos: unknown; freshList?: unknown },
       context: ToolCallContext,
     ): Promise<ToolResult> {
       try {
+        if (
+          input.freshList !== undefined &&
+          typeof input.freshList !== "boolean"
+        ) {
+          throw new Error("opencode-todo: freshList must be a boolean");
+        }
         const items = normalizeItems(input.todos);
-        const { revision, todos } = store.write(context.sessionID, items);
+        const { revision, todos, listCreated } = store.write(
+          context.sessionID,
+          items,
+          undefined,
+          input.freshList ?? false,
+        );
         return {
           content: renderSummary(todos),
-          metadata: buildMetadata(context.sessionID, revision, todos),
+          metadata: buildMetadata(
+            context.sessionID,
+            revision,
+            todos,
+            listCreated,
+          ),
         };
       } catch (error) {
         log("todowrite failed", error);
@@ -129,7 +162,10 @@ export function createTodoReadTool(store: Store, log: Logger = defaultLogger) {
     description: TODOREAD_DESCRIPTION,
     input: { type: "object", properties: {}, required: [] },
     options: { codemode: false as const },
-    async execute(_input: Record<string, never>, context: ToolCallContext): Promise<ToolResult> {
+    async execute(
+      _input: Record<string, never>,
+      context: ToolCallContext,
+    ): Promise<ToolResult> {
       try {
         const todos = store.read(context.sessionID);
         const revision = store.revision(context.sessionID);

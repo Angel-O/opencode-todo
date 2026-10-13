@@ -3,7 +3,12 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { VALID_STATUSES, type TodoInput, type TodoItem, type TodoStatus } from "./types.js";
+import {
+  VALID_STATUSES,
+  type TodoInput,
+  type TodoItem,
+  type TodoStatus,
+} from "./types.js";
 
 export type { TodoInput, TodoItem, TodoStatus } from "./types.js";
 
@@ -15,6 +20,7 @@ export interface StoreOptions {
 export interface WriteResult {
   revision: number;
   todos: TodoItem[];
+  listCreated: boolean;
 }
 
 /** Bumped whenever the on-disk schema changes. See design.md D7. */
@@ -33,7 +39,8 @@ export function resolveDbPath(
 ): string {
   if (options.dbPath) return options.dbPath;
   if (env.OPENCODE_TODO_DB) return env.OPENCODE_TODO_DB;
-  const base = env.XDG_DATA_HOME || join(env.HOME ?? homedir(), ".local", "share");
+  const base =
+    env.XDG_DATA_HOME || join(env.HOME ?? homedir(), ".local", "share");
   return join(base, "opencode-todo", "todos.db");
 }
 
@@ -73,7 +80,9 @@ export class Store {
 
     this.db = new Database(dbPath, { create: true });
     this.db.exec("PRAGMA journal_mode = WAL");
-    this.db.exec(`PRAGMA busy_timeout = ${options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS}`);
+    this.db.exec(
+      `PRAGMA busy_timeout = ${options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS}`,
+    );
     this.migrate();
   }
 
@@ -149,7 +158,15 @@ export class Store {
    * across matches, stamps/clears completed_at on transition, and archives (soft-deletes) any
    * existing item absent from the incoming list. Runs in a single transaction.
    */
-  write(sessionID: string, items: readonly TodoInput[], now: number = Date.now()): WriteResult {
+  write(
+    sessionID: string,
+    items: readonly TodoInput[],
+    now: number = Date.now(),
+    freshList: boolean = false,
+  ): WriteResult {
+    if (typeof freshList !== "boolean") {
+      throw new Error("opencode-todo: freshList must be a boolean");
+    }
     for (const item of items) {
       if (!VALID_STATUSES.has(item.status)) {
         throw new Error(`opencode-todo: invalid status "${item.status}"`);
@@ -158,7 +175,9 @@ export class Store {
 
     const run = this.db.transaction(() => {
       const existing = this.db
-        .query("SELECT * FROM todo WHERE session_id = ? AND archived_at IS NULL")
+        .query(
+          "SELECT * FROM todo WHERE session_id = ? AND archived_at IS NULL",
+        )
         .all(sessionID) as TodoRow[];
       const byId = new Map(existing.map((row) => [row.item_id, row]));
       const matchedIds = new Set<string>();
@@ -199,7 +218,8 @@ export class Store {
         const createdAt = match?.created_at ?? now;
         let completedAt: number | null;
         if (item.status === "completed") {
-          completedAt = match?.status === "completed" ? (match.completed_at ?? now) : now;
+          completedAt =
+            match?.status === "completed" ? (match.completed_at ?? now) : now;
         } else {
           completedAt = null;
         }
@@ -225,7 +245,9 @@ export class Store {
 
       const revision = this.bumpRevision(sessionID, now);
       const todos = this.read(sessionID);
-      return { revision, todos };
+      const listCreated =
+        todos.length > 0 && (existing.length === 0 || freshList);
+      return { revision, todos, listCreated };
     });
 
     return run();
@@ -242,7 +264,9 @@ export class Store {
   /** Archives every non-archived item for a session. Used by reactive session.deleted pruning. */
   archiveSession(sessionID: string, now: number = Date.now()): number {
     const result = this.db
-      .query("UPDATE todo SET archived_at = ? WHERE session_id = ? AND archived_at IS NULL")
+      .query(
+        "UPDATE todo SET archived_at = ? WHERE session_id = ? AND archived_at IS NULL",
+      )
       .run(now, sessionID);
     return result.changes;
   }
@@ -252,7 +276,10 @@ export class Store {
    * `graceDays`. Age-based only — no session-liveness lookup (design D5). Returns the number of
    * rows archived and the distinct session ids touched, so callers can notify RPC subscribers.
    */
-  sweepOrphans(graceDays: number, now: number = Date.now()): { archived: number; sessionIds: string[] } {
+  sweepOrphans(
+    graceDays: number,
+    now: number = Date.now(),
+  ): { archived: number; sessionIds: string[] } {
     const cutoff = now - graceDays * 24 * 60 * 60 * 1000;
     const affected = this.db
       .query(

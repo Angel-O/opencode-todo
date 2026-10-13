@@ -57,6 +57,100 @@ describe("schema creation and migration", () => {
   });
 });
 
+// spec: openspec/specs/todo-storage/spec.md
+describe("transaction-bound list creation", () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = new Store({ dbPath: ":memory:" });
+  });
+
+  afterEach(() => store.close());
+
+  it("Sequential ordinary writes signal creation only once", () => {
+    const first = store.write(
+      "s1",
+      [{ content: "a", status: "in_progress" }],
+      100,
+    );
+    const second = store.write(
+      "s1",
+      [{ content: "b", status: "pending" }],
+      200,
+    );
+    expect(first.listCreated).toBe(true);
+    expect(second.listCreated).toBe(false);
+    expect(first.revision).toBe(1);
+    expect(second.revision).toBe(2);
+    expect(first.todos.map((todo) => todo.content)).toEqual(["a"]);
+    expect(second.todos).toEqual(store.read("s1"));
+    expect(second.todos.map((todo) => todo.content)).toEqual(["b"]);
+  });
+
+  it("Explicit fresh intent preserves timestamp-aware writes", () => {
+    const first = store.write(
+      "s1",
+      [
+        { content: "finish", status: "pending" },
+        { content: "done", status: "completed" },
+        { content: "omit", status: "pending" },
+      ],
+      100,
+    );
+    const [finish, done, omitted] = first.todos;
+    const fresh = store.write(
+      "s1",
+      [
+        { ...done!, status: "completed" },
+        { ...finish!, status: "completed" },
+      ],
+      200,
+      true,
+    );
+    expect(fresh.listCreated).toBe(true);
+    expect(fresh.revision).toBe(2);
+    expect(fresh.todos.map((todo) => todo.id)).toEqual([done!.id, finish!.id]);
+    expect(fresh.todos.map((todo) => todo.createdAt)).toEqual([100, 100]);
+    expect(fresh.todos.map((todo) => todo.updatedAt)).toEqual([200, 200]);
+    expect(fresh.todos.map((todo) => todo.completedAt)).toEqual([100, 200]);
+    expect(fresh.todos.map((todo) => todo.position)).toEqual([0, 1]);
+    const archived = store.db
+      .query("SELECT archived_at FROM todo WHERE item_id = ?")
+      .get(omitted!.id) as { archived_at: number };
+    expect(archived.archived_at).toBe(200);
+  });
+
+  it("Invalid store fresh intent is rejected before mutation", () => {
+    const first = store.write(
+      "s1",
+      [{ content: "keep", status: "pending" }],
+      100,
+    );
+    for (const invalid of [null, "true", 1, {}, []]) {
+      expect(() => store.write("s1", [], 200, invalid as never)).toThrow(
+        /freshList/,
+      );
+      expect(store.read("s1")).toEqual(first.todos);
+      expect(store.revision("s1")).toBe(first.revision);
+    }
+  });
+
+  it("Failed write rolls back creation and session changes", () => {
+    // Fail after item mutation, at the transaction's revision update.
+    store.db.exec(`CREATE TRIGGER fail_revision BEFORE INSERT ON todo_revision
+      BEGIN SELECT RAISE(ABORT, 'revision failure'); END`);
+    expect(() =>
+      store.write("s1", [{ content: "a", status: "pending" }], 100),
+    ).toThrow("revision failure");
+    expect(store.read("s1")).toEqual([]);
+    expect(store.revision("s1")).toBe(0);
+    store.db.exec("DROP TRIGGER fail_revision");
+    expect(
+      store.write("s1", [{ content: "a", status: "pending" }], 200).listCreated,
+    ).toBe(true);
+  });
+});
+
 describe("item identity across writes", () => {
   // spec: todo-storage "Item identity is preserved across writes"
   it("matching item by id preserves its history", () => {
@@ -65,7 +159,9 @@ describe("item identity across writes", () => {
     const createdId = first.todos[0]!.id;
     const createdAt = first.todos[0]!.createdAt;
 
-    const second = store.write("s1", [{ id: createdId, content: "a", status: "pending" }]);
+    const second = store.write("s1", [
+      { id: createdId, content: "a", status: "pending" },
+    ]);
 
     expect(second.todos).toHaveLength(1);
     expect(second.todos[0]!.id).toBe(createdId);
@@ -108,7 +204,9 @@ describe("completed_at transitions", () => {
     const first = store.write("s1", [{ content: "a", status: "pending" }]);
     const id = first.todos[0]!.id;
 
-    const second = store.write("s1", [{ id, content: "a", status: "completed" }]);
+    const second = store.write("s1", [
+      { id, content: "a", status: "completed" },
+    ]);
 
     expect(second.todos[0]!.completedAt).not.toBeNull();
     store.close();
@@ -132,7 +230,9 @@ describe("completed_at transitions", () => {
     const id = first.todos[0]!.id;
     const completedAt = first.todos[0]!.completedAt;
 
-    const second = store.write("s1", [{ id, content: "a", status: "completed" }]);
+    const second = store.write("s1", [
+      { id, content: "a", status: "completed" },
+    ]);
 
     expect(second.todos[0]!.completedAt).toBe(completedAt);
     store.close();
@@ -182,7 +282,9 @@ describe("archival on write", () => {
     expect(store.read("s1")).toHaveLength(0);
 
     const raw = new Database(join(dir, "todos.db"));
-    const rows = raw.query("SELECT * FROM todo WHERE session_id = ?").all("s1") as Array<{
+    const rows = raw
+      .query("SELECT * FROM todo WHERE session_id = ?")
+      .all("s1") as Array<{
       archived_at: number | null;
     }>;
     raw.close();
@@ -205,12 +307,18 @@ describe("database path resolution", () => {
   });
 
   it("prefers an explicit dbPath option over the default", () => {
-    const path = resolveDbPath({ dbPath: "/custom/todos.db" }, { XDG_DATA_HOME: "/tmp/xdg" });
+    const path = resolveDbPath(
+      { dbPath: "/custom/todos.db" },
+      { XDG_DATA_HOME: "/tmp/xdg" },
+    );
     expect(path).toBe("/custom/todos.db");
   });
 
   it("uses OPENCODE_TODO_DB when no explicit option is given", () => {
-    const path = resolveDbPath({}, { OPENCODE_TODO_DB: "/env/todos.db", XDG_DATA_HOME: "/tmp/xdg" });
+    const path = resolveDbPath(
+      {},
+      { OPENCODE_TODO_DB: "/env/todos.db", XDG_DATA_HOME: "/tmp/xdg" },
+    );
     expect(path).toBe("/env/todos.db");
   });
 

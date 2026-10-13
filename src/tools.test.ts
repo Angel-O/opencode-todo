@@ -1,21 +1,15 @@
 import { describe, expect, it, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { Store } from "./store";
 import { createTodoReadTool, createTodoWriteTool } from "./tools";
 
-let dir: string;
 let store: Store;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "opencode-todo-tools-"));
-  store = new Store({ dbPath: join(dir, "todos.db") });
+  store = new Store({ dbPath: ":memory:" });
 });
 
 afterEach(() => {
   store.close();
-  rmSync(dir, { recursive: true, force: true });
 });
 
 describe("todowrite tool", () => {
@@ -28,7 +22,10 @@ describe("todowrite tool", () => {
 
   it("applies the submitted items to the store", async () => {
     const tool = createTodoWriteTool(store);
-    await tool.execute({ todos: [{ content: "a", status: "pending" }] }, { sessionID: "s1" });
+    await tool.execute(
+      { todos: [{ content: "a", status: "pending" }] },
+      { sessionID: "s1" },
+    );
     expect(store.read("s1")).toHaveLength(1);
   });
 
@@ -66,8 +63,8 @@ describe("todowrite tool", () => {
     expect(todos[0]?.status).toBe("pending");
   });
 
-  // spec: todo-tools "Tool results carry a structured metadata contract"
-  it("returns metadata with source, schemaVersion, sessionID, revision, todos, counts", async () => {
+  // spec: openspec/specs/todo-tools/spec.md
+  it("todowrite result includes metadata", async () => {
     const tool = createTodoWriteTool(store);
     const result = await tool.execute(
       { todos: [{ content: "a", status: "pending" }] },
@@ -79,6 +76,7 @@ describe("todowrite tool", () => {
     expect(result.metadata.revision).toBeGreaterThan(0);
     expect(result.metadata.todos).toHaveLength(1);
     expect(result.metadata.counts.pending).toBe(1);
+    expect(result.metadata.listCreated).toBe(true);
   });
 
   // spec: todo-tools "Tool failures are surfaced to the model"
@@ -89,10 +87,15 @@ describe("todowrite tool", () => {
       },
     } as unknown as Store;
     const logs: unknown[] = [];
-    const tool = createTodoWriteTool(failingStore, (msg, err) => logs.push([msg, err]));
+    const tool = createTodoWriteTool(failingStore, (msg, err) =>
+      logs.push([msg, err]),
+    );
 
     await expect(
-      tool.execute({ todos: [{ content: "a", status: "pending" }] }, { sessionID: "s1" }),
+      tool.execute(
+        { todos: [{ content: "a", status: "pending" }] },
+        { sessionID: "s1" },
+      ),
     ).rejects.toThrow("boom");
     expect(logs).toHaveLength(1);
   });
@@ -114,14 +117,26 @@ describe("todoread tool", () => {
     expect(result.metadata.todos[0]!.content).toBe("a");
   });
 
-  // spec: todo-tools "Tool results carry a structured metadata contract"
-  it("returns the same metadata shape as todowrite", async () => {
-    store.write("s1", [{ content: "a", status: "completed" }]);
+  // spec: openspec/specs/todo-tools/spec.md
+  it("todoread result includes metadata", async () => {
+    const written = await createTodoWriteTool(store).execute(
+      { todos: [{ content: "a", status: "completed" }] },
+      { sessionID: "s1" },
+    );
     const tool = createTodoReadTool(store);
     const result = await tool.execute({}, { sessionID: "s1" });
     expect(result.metadata.source).toBe("opencode-todo");
     expect(result.metadata.sessionID).toBe("s1");
     expect(result.metadata.counts.completed).toBe(1);
+    expect(Object.keys(result.metadata).sort()).toEqual(
+      Object.keys(written.metadata).sort(),
+    );
+    expect(result.metadata).toEqual({
+      ...written.metadata,
+      listCreated: false,
+    });
+    expect(store.read("s1")).toEqual(written.metadata.todos);
+    expect(store.revision("s1")).toBe(written.metadata.revision);
   });
 
   // spec: todo-tools "Tool failures are surfaced to the model"
@@ -133,9 +148,147 @@ describe("todoread tool", () => {
       revision: () => 0,
     } as unknown as Store;
     const logs: unknown[] = [];
-    const tool = createTodoReadTool(failingStore, (msg, err) => logs.push([msg, err]));
+    const tool = createTodoReadTool(failingStore, (msg, err) =>
+      logs.push([msg, err]),
+    );
 
     await expect(tool.execute({}, { sessionID: "s1" })).rejects.toThrow("boom");
     expect(logs).toHaveLength(1);
+  });
+});
+
+// spec: openspec/specs/todo-tools/spec.md
+describe("list creation metadata", () => {
+  const context = { sessionID: "s1" };
+
+  it("Invalid fresh-list flag is rejected before mutation", async () => {
+    const tool = createTodoWriteTool(store, () => {});
+    const first = store.write(
+      "s1",
+      [{ content: "keep", status: "pending" }],
+      100,
+    );
+    for (const freshList of [null, "true", 1, {}, []]) {
+      await expect(
+        tool.execute({ todos: [], freshList }, context),
+      ).rejects.toThrow(/freshList/);
+      expect(store.read("s1")).toEqual(first.todos);
+      expect(store.revision("s1")).toBe(first.revision);
+    }
+  });
+
+  it("Initial mixed-status list reports creation", async () => {
+    const tool = createTodoWriteTool(store);
+    for (const freshList of [undefined, false]) {
+      const result = await tool.execute(
+        {
+          todos: [
+            { content: "work", status: "in_progress" },
+            { content: "next" },
+          ],
+          ...(freshList === undefined ? {} : { freshList }),
+        },
+        { sessionID: `initial-${String(freshList)}` },
+      );
+      expect(result.metadata.listCreated).toBe(true);
+    }
+  });
+
+  it("Ordinary non-empty updates do not report creation", async () => {
+    const tool = createTodoWriteTool(store);
+    let result = await tool.execute(
+      { todos: [{ content: "a" }, { content: "b" }] },
+      context,
+    );
+    const writes = [
+      [{ content: "a", status: "in_progress" }, { content: "b" }],
+      [{ content: "a" }, { content: "b" }, { content: "c" }],
+      [{ content: "c" }, { content: "a" }, { content: "b" }],
+      [{ content: "c" }, { content: "a" }],
+      [{ content: "c" }, { content: "a" }],
+      [{ content: "replacement", status: "completed" }],
+      [{ content: "replacement", status: "cancelled" }],
+      [{ content: "new task" }],
+    ];
+    for (const todos of writes) {
+      const revision = result.metadata.revision;
+      result = await tool.execute({ todos }, context);
+      expect(result.metadata.listCreated).toBe(false);
+      expect(result.metadata.revision).toBe(revision + 1);
+    }
+  });
+
+  it("Explicit fresh list can carry existing items", async () => {
+    const first = store.write(
+      "s1",
+      [{ content: "carry", status: "in_progress" }],
+      100,
+    );
+    const carried = first.todos[0]!;
+    const result = await createTodoWriteTool(store).execute(
+      {
+        todos: [carried, { content: "new" }],
+        freshList: true,
+      },
+      context,
+    );
+    expect(result.metadata.listCreated).toBe(true);
+    expect(result.metadata.todos[0]).toMatchObject({
+      id: carried.id,
+      createdAt: carried.createdAt,
+      completedAt: carried.completedAt,
+    });
+  });
+
+  it("Repeated explicit fresh writes report creation", async () => {
+    const tool = createTodoWriteTool(store);
+    const first = await tool.execute({ todos: [{ content: "a" }] }, context);
+    for (let i = 0; i < 2; i++) {
+      const result = await tool.execute(
+        { todos: first.metadata.todos, freshList: true },
+        context,
+      );
+      expect(result.metadata.listCreated).toBe(true);
+      expect(result.metadata.revision).toBe(first.metadata.revision + i + 1);
+    }
+  });
+
+  it("Empty writes do not report creation", async () => {
+    const tool = createTodoWriteTool(store);
+    for (const freshList of [undefined, false, true]) {
+      const sessionID = `empty-${String(freshList)}`;
+      const first = store.write(
+        sessionID,
+        [{ content: "archive", status: "pending" }],
+        100,
+      );
+      const result = await tool.execute(
+        {
+          todos: [],
+          ...(freshList === undefined ? {} : { freshList }),
+        },
+        { sessionID },
+      );
+      expect(result.metadata.listCreated).toBe(false);
+      expect(result.metadata.todos).toEqual([]);
+      expect(result.metadata.revision).toBe(first.revision + 1);
+      const row = store.db
+        .query("SELECT archived_at FROM todo WHERE session_id = ?")
+        .get(sessionID) as { archived_at: number | null };
+      expect(row.archived_at).not.toBeNull();
+    }
+  });
+
+  it("Non-empty list after clearing reports creation", async () => {
+    const tool = createTodoWriteTool(store);
+    await tool.execute({ todos: [{ content: "old" }] }, context);
+    await tool.execute({ todos: [] }, context);
+    const result = await tool.execute(
+      { todos: [{ content: "new", status: "in_progress" }] },
+      context,
+    );
+    expect(result.metadata.listCreated).toBe(true);
+    expect(result.metadata.revision).toBe(3);
+    expect(result.metadata.todos.map((todo) => todo.content)).toEqual(["new"]);
   });
 });
