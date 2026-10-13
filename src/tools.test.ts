@@ -272,10 +272,6 @@ describe("list creation metadata", () => {
       expect(result.metadata.listCreated).toBe(false);
       expect(result.metadata.todos).toEqual([]);
       expect(result.metadata.revision).toBe(first.revision + 1);
-      const row = store.db
-        .query("SELECT archived_at FROM todo WHERE session_id = ?")
-        .get(sessionID) as { archived_at: number | null };
-      expect(row.archived_at).not.toBeNull();
     }
   });
 

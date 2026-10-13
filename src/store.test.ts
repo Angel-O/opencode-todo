@@ -60,12 +60,18 @@ describe("schema creation and migration", () => {
 // spec: openspec/specs/todo-storage/spec.md
 describe("transaction-bound list creation", () => {
   let store: Store;
+  let raw: Database;
 
   beforeEach(() => {
-    store = new Store({ dbPath: ":memory:" });
+    const dbPath = join(dir, "creation.db");
+    store = new Store({ dbPath });
+    raw = new Database(dbPath);
   });
 
-  afterEach(() => store.close());
+  afterEach(() => {
+    raw.close();
+    store.close();
+  });
 
   it("Sequential ordinary writes signal creation only once", () => {
     const first = store.write(
@@ -114,7 +120,7 @@ describe("transaction-bound list creation", () => {
     expect(fresh.todos.map((todo) => todo.updatedAt)).toEqual([200, 200]);
     expect(fresh.todos.map((todo) => todo.completedAt)).toEqual([100, 200]);
     expect(fresh.todos.map((todo) => todo.position)).toEqual([0, 1]);
-    const archived = store.db
+    const archived = raw
       .query("SELECT archived_at FROM todo WHERE item_id = ?")
       .get(omitted!.id) as { archived_at: number };
     expect(archived.archived_at).toBe(200);
@@ -137,14 +143,14 @@ describe("transaction-bound list creation", () => {
 
   it("Failed write rolls back creation and session changes", () => {
     // Fail after item mutation, at the transaction's revision update.
-    store.db.exec(`CREATE TRIGGER fail_revision BEFORE INSERT ON todo_revision
+    raw.exec(`CREATE TRIGGER fail_revision BEFORE INSERT ON todo_revision
       BEGIN SELECT RAISE(ABORT, 'revision failure'); END`);
     expect(() =>
       store.write("s1", [{ content: "a", status: "pending" }], 100),
     ).toThrow("revision failure");
     expect(store.read("s1")).toEqual([]);
     expect(store.revision("s1")).toBe(0);
-    store.db.exec("DROP TRIGGER fail_revision");
+    raw.exec("DROP TRIGGER fail_revision");
     expect(
       store.write("s1", [{ content: "a", status: "pending" }], 200).listCreated,
     ).toBe(true);
