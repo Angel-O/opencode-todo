@@ -126,6 +126,101 @@ describe("transaction-bound list creation", () => {
     expect(archived.archived_at).toBe(200);
   });
 
+  // spec: openspec/specs/todo-storage/spec.md
+  it("Late archived ID rejects a mixed batch without mutation", () => {
+    store.write(
+      "s1",
+      [{ id: "stale", content: "old", status: "completed" }],
+      100,
+    );
+    const current = store.write(
+      "s1",
+      [
+        { content: "keep", status: "in_progress" },
+        { content: "done", status: "completed" },
+      ],
+      200,
+      true,
+    );
+    const rows = raw
+      .query("SELECT * FROM todo ORDER BY session_id, item_id")
+      .all();
+    // A rollback alone is insufficient: validation must precede attempted mutations.
+    raw.exec(`CREATE TRIGGER forbid_update BEFORE UPDATE ON todo
+      BEGIN SELECT RAISE(ABORT, 'mutation attempted'); END`);
+    raw.exec(`CREATE TRIGGER forbid_insert BEFORE INSERT ON todo
+      BEGIN SELECT RAISE(ABORT, 'mutation attempted'); END`);
+
+    for (const freshList of [undefined, true]) {
+      expect(() =>
+        store.write(
+          "s1",
+          [
+            { ...current.todos[1]!, content: "changed", status: "pending" },
+            { content: "new", status: "pending" },
+            { id: "stale", content: "reused", status: "pending" },
+          ],
+          300,
+          freshList,
+        ),
+      ).toThrow(/archived.*stale/i);
+      expect(store.read("s1")).toEqual(current.todos);
+      expect(store.revision("s1")).toBe(current.revision);
+      expect(
+        raw.query("SELECT * FROM todo ORDER BY session_id, item_id").all(),
+      ).toEqual(rows);
+    }
+  });
+
+  // spec: openspec/specs/todo-storage/spec.md
+  it("Archived ID is rejected with an empty active list", () => {
+    store.write(
+      "s1",
+      [{ id: "stale", content: "old", status: "pending" }],
+      100,
+    );
+    const cleared = store.write("s1", [], 200);
+    const rows = raw.query("SELECT * FROM todo").all();
+    expect(() =>
+      store.write(
+        "s1",
+        [{ id: "stale", content: "reused", status: "completed" }],
+        300,
+      ),
+    ).toThrow(/archived.*stale/i);
+    expect(store.read("s1")).toEqual([]);
+    expect(store.revision("s1")).toBe(cleared.revision);
+    expect(raw.query("SELECT * FROM todo").all()).toEqual(rows);
+  });
+
+  // spec: openspec/specs/todo-storage/spec.md
+  it("Unknown and other-session archived IDs remain acceptable", () => {
+    store.write(
+      "other",
+      [{ id: "shared", content: "old", status: "pending" }],
+      100,
+    );
+    const other = store.write("other", [], 200);
+    const history = raw
+      .query("SELECT * FROM todo WHERE session_id = ?")
+      .all("other");
+    const result = store.write(
+      "s1",
+      [
+        { id: "shared", content: "current", status: "pending" },
+        { id: "unknown", content: "new", status: "in_progress" },
+      ],
+      300,
+    );
+    expect(result.todos.map((todo) => todo.id)).toEqual(["shared", "unknown"]);
+    expect(result.listCreated).toBe(true);
+    expect(result.revision).toBe(1);
+    expect(
+      raw.query("SELECT * FROM todo WHERE session_id = ?").all("other"),
+    ).toEqual(history);
+    expect(store.revision("other")).toBe(other.revision);
+  });
+
   it("Invalid store fresh intent is rejected before mutation", () => {
     const first = store.write(
       "s1",
@@ -157,6 +252,7 @@ describe("transaction-bound list creation", () => {
   });
 });
 
+// spec: openspec/specs/todo-storage/spec.md
 describe("item identity across writes", () => {
   // spec: todo-storage "Item identity is preserved across writes"
   it("matching item by id preserves its history", () => {
@@ -175,7 +271,7 @@ describe("item identity across writes", () => {
     store.close();
   });
 
-  it("recovers an id-less item by exact content match", () => {
+  it("Id-less item recovered by content match", () => {
     const store = new Store({ dbPath: join(dir, "todos.db") });
     const first = store.write("s1", [{ content: "a", status: "pending" }]);
     const createdAt = first.todos[0]!.createdAt;
@@ -188,7 +284,7 @@ describe("item identity across writes", () => {
     store.close();
   });
 
-  it("creates a genuinely new item when id and content match nothing", () => {
+  it("Genuinely new item is created", () => {
     const store = new Store({ dbPath: join(dir, "todos.db") });
     store.write("s1", [{ content: "a", status: "pending" }]);
     const second = store.write("s1", [
@@ -245,9 +341,10 @@ describe("completed_at transitions", () => {
   });
 });
 
+// spec: openspec/specs/todo-storage/spec.md
 describe("write ordering and revision", () => {
   // spec: todo-storage "Item order and write revision are tracked"
-  it("reflects item order from the most recent write", () => {
+  it("Item order reflects the most recent write", () => {
     const store = new Store({ dbPath: join(dir, "todos.db") });
     store.write("s1", [
       { content: "a", status: "pending" },
@@ -264,7 +361,7 @@ describe("write ordering and revision", () => {
     store.close();
   });
 
-  it("increments the revision on every write to the same session", () => {
+  it("Revision increments on every write", () => {
     const store = new Store({ dbPath: join(dir, "todos.db") });
     const first = store.write("s1", [{ content: "a", status: "pending" }]);
     const second = store.write("s1", [{ content: "a", status: "in_progress" }]);
