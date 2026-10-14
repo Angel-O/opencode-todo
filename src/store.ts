@@ -174,6 +174,17 @@ export class Store {
     }
 
     const run = this.db.transaction(() => {
+      const archivedItem = this.db.query(
+        "SELECT item_id FROM todo WHERE session_id = ? AND item_id = ? AND archived_at IS NOT NULL",
+      );
+      for (const item of items) {
+        if (item.id !== undefined && archivedItem.get(sessionID, item.id)) {
+          throw new Error(
+            `opencode-todo: archived todo ID "${item.id}" cannot be reused; use a current item ID or omit the ID`,
+          );
+        }
+      }
+
       const existing = this.db
         .query(
           "SELECT * FROM todo WHERE session_id = ? AND archived_at IS NULL",

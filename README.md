@@ -78,6 +78,15 @@ sweep or a manual database operation removes it permanently. An item's `status` 
 optional and defaults to `pending` when omitted; an explicitly supplied value outside
 `pending`/`in_progress`/`completed`/`cancelled` is still rejected.
 
+An ID belonging to an archived item in the same session is rejected, including
+with `freshList: true`. The error names the stale ID; the entire write fails
+without changing the current list, archived history, or revision. Call `todoread`
+to get current IDs, then resubmit the full intended list using a current item ID
+or omitting the stale ID. Keep every current item you intend to retain. An
+ordinary corrected retry against a preserved non-empty list reports
+`listCreated: false`. Genuinely new IDs and IDs archived only in another session
+remain valid.
+
 Set the optional boolean `freshList` to `true` when starting a fresh task list while
 a non-empty list already exists. You can carry unfinished items into that fresh
 list by retaining their IDs; their history is preserved. Omit the flag (or use

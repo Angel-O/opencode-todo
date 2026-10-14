@@ -79,6 +79,54 @@ describe("todowrite tool", () => {
     expect(result.metadata.listCreated).toBe(true);
   });
 
+  // spec: openspec/specs/todo-tools/spec.md
+  it("Archived-ID error preserves the list and supports ordinary recovery", async () => {
+    const write = createTodoWriteTool(store, () => {});
+    const read = createTodoReadTool(store);
+    for (const recovery of ["current-id", "omit-id"]) {
+      const context = { sessionID: recovery };
+      store.write(
+        recovery,
+        [{ id: "stale", content: "old", status: "completed" }],
+        100,
+      );
+      const current = store.write(
+        recovery,
+        [
+          { content: "keep", status: "in_progress" },
+          { content: "done", status: "completed" },
+        ],
+        200,
+        true,
+      );
+      await expect(
+        write.execute(
+          { todos: [{ id: "stale", content: "keep", status: "completed" }] },
+          context,
+        ),
+      ).rejects.toThrow(/archived.*stale.*current.*omit/i);
+      const preserved = await read.execute({}, context);
+      expect(preserved.metadata.todos).toEqual(current.todos);
+      expect(preserved.metadata.revision).toBe(current.revision);
+      const corrected = await write.execute(
+        {
+          todos: preserved.metadata.todos.map((todo) => ({
+            ...(recovery === "current-id" ? { id: todo.id } : {}),
+            content: todo.content,
+            status: "completed",
+          })),
+        },
+        context,
+      );
+      expect(corrected.metadata.listCreated).toBe(false);
+      expect(corrected.metadata.revision).toBe(current.revision + 1);
+      expect(corrected.metadata.todos.map((todo) => todo.id)).toEqual(
+        current.todos.map((todo) => todo.id),
+      );
+      expect(corrected.metadata.counts.completed).toBe(2);
+    }
+  });
+
   // spec: todo-tools "Tool failures are surfaced to the model"
   it("logs and rethrows a store failure", async () => {
     const failingStore = {
