@@ -115,7 +115,7 @@ The system SHALL accept an optional boolean `freshList` flag on `todowrite`, wit
 
 ### Requirement: `todowrite` reports list creation independently of statuses
 
-The system SHALL report `listCreated` true for a successful non-empty write exactly when the pre-write list has no non-archived items or `freshList` is true; otherwise it reports false. Completed and cancelled non-archived items count as an existing list.
+The system SHALL report `listCreated` true for a successful non-empty write exactly when the pre-write list has no non-archived items or `freshList` is true; otherwise it reports false. Completed and cancelled non-archived items count as an existing list. Archived-ID rejection produces no successful creation result.
 
 #### Scenario: Initial mixed-status list reports creation
 
@@ -126,7 +126,7 @@ The system SHALL report `listCreated` true for a successful non-empty write exac
 #### Scenario: Ordinary non-empty updates do not report creation
 
 - **GIVEN** the session has a non-empty list
-- **WHEN** ordinary writes change statuses, add or remove items, reorder items, repeat the list, or replace all items without `freshList: true`
+- **WHEN** ordinary successful writes change statuses, add or remove items, reorder items, repeat the list, or replace all items without `freshList: true`
 - **THEN** each result reports `listCreated` false, including all-pending writes and writes following completed or cancelled lists
 
 #### Scenario: Explicit fresh list can carry existing items
@@ -149,5 +149,18 @@ The system SHALL report `listCreated` true for a successful non-empty write exac
 #### Scenario: Non-empty list after clearing reports creation
 
 - **GIVEN** the session's active list was cleared and its former items remain archived
-- **WHEN** a non-empty list is written without explicit fresh intent
+- **WHEN** a non-empty list with no same-session archived IDs is successfully written without explicit fresh intent
 - **THEN** `listCreated` is true regardless of archived history
+
+### Requirement: Archived-ID failures provide actionable recovery
+
+The system SHALL surface a same-session archived-ID write failure as a tool error identifying the stale ID and advising use of a current item ID or omission of the ID, without a successful metadata result.
+
+#### Scenario: Archived-ID error preserves the list and supports ordinary recovery
+
+- **GIVEN** a session has a non-empty active list and an archived item
+- **WHEN** `todowrite` receives that archived ID
+- **THEN** the tool fails with an error naming the ID and advising use of a current item ID or omission of the ID
+- **AND** the stored list and revision remain unchanged and no successful metadata is returned
+- **WHEN** the caller reads the current list and resubmits the full intended list with current IDs or without the stale ID, without fresh intent
+- **THEN** the write succeeds and `listCreated` is false
