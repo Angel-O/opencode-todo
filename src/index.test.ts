@@ -20,7 +20,10 @@ interface FakeTool {
   execute: (input: unknown, context: { sessionID: string }) => Promise<unknown>;
 }
 
-function createFakeCtx(dbPath: string) {
+function createFakeCtx(
+  dbPath: string,
+  beforeEvent?: (name: string, data: unknown) => void | Promise<void>,
+) {
   const tools: FakeTool[] = [];
   let rpcHandlers: Record<string, (input: unknown) => Promise<unknown>> | undefined;
   const emittedEvents: Array<{ name: string; data: unknown }> = [];
@@ -43,6 +46,7 @@ function createFakeCtx(dbPath: string) {
         return {
           events: {
             emit: async (name: string, data: unknown) => {
+              await beforeEvent?.(name, data);
               emittedEvents.push({ name, data });
             },
           },
@@ -98,6 +102,36 @@ describe("plugin setup wiring", () => {
     expect(emittedEvents[0]?.name).toBe("changed");
     expect((emittedEvents[0]?.data as { sessionID: string }).sessionID).toBe("s1");
 
+    await (cleanup as () => Promise<void>)?.();
+  });
+
+  it("waits for RPC publication before todowrite returns", async () => {
+    let published = false;
+    let release!: () => void;
+    const publication = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { ctx, tools } = createFakeCtx(join(dir, "todos.db"), async () => {
+      published = true;
+      await publication;
+    });
+    const cleanup = await plugin.setup(ctx as never);
+
+    const todowrite = tools.find((t) => t.name === "todowrite")!;
+    let returned = false;
+    const result = todowrite
+      .execute({ todos: [{ content: "a", status: "pending" }] }, { sessionID: "s1" })
+      .then(() => {
+        returned = true;
+      });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(published).toBe(true);
+    expect(returned).toBe(false);
+
+    release();
+    await result;
+    expect(returned).toBe(true);
     await (cleanup as () => Promise<void>)?.();
   });
 

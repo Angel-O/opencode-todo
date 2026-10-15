@@ -78,6 +78,10 @@ export default Plugin.define({
         })
       : undefined;
 
+    /**
+     * Publication is intentionally awaited: RPC delivery is part of the host tool-completion
+     * boundary, even though the local store work has already finished.
+     */
     const emitChanged = async (sessionID: string): Promise<void> => {
       if (!store || !rpcRegistration) return;
       await rpcRegistration.events.emit("changed", {
